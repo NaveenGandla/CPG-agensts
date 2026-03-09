@@ -2,7 +2,8 @@
 Integration tests for the FastAPI endpoints.
 
 These test the API layer with a real FastAPI TestClient but mock
-the Agent Framework agent (no actual LLM calls).
+the Agent Framework agent (no actual LLM calls). The orchestrator
+uses a human-in-the-loop flow for CPG creation.
 """
 
 import json

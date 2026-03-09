@@ -1,8 +1,12 @@
 """
 Domain tools exposed to agents via the @tool decorator.
 
-Each tool is a standalone async function that the Agent Framework
-automatically converts into a function-tool schema for the LLM.
+Each tool maps to a stage in the human-in-the-loop CPG creation flow:
+  Stage 1 — search_clinical_evidence  (Evidence Retrieval)
+  Stage 2 — generate_or_modify_cpg    (sub-agent, wired in factory.py)
+  Stage 3 — validate_cpg_structure    (Template Validation)
+            review_cpg_document       (sub-agent, wired in factory.py)
+  Stage 4 — store_cpg_document        (Finalize & Persist — only after user approval)
 """
 
 import json
@@ -18,12 +22,8 @@ from src.services.search_client import hybrid_search
 
 logger = get_logger("tools")
 
-# Lazy reference to avoid circular import — set by factory.py at init time
-_cpg_workflow = None
-_session_store_ref = None
 
-
-# ── Knowledge Retrieval ─────────────────────────────────────────
+# ── Stage 1: Evidence Retrieval ─────────────────────────────────
 
 
 @tool(
@@ -70,15 +70,7 @@ async def search_clinical_evidence(
     return "\n\n---\n\n".join(formatted)
 
 
-# ── CPG Document Management ────────────────────────────────────
-
-
-CPG_SECTION_NAMES = [
-    "title", "executive_summary", "scope_and_purpose", "target_population",
-    "clinical_recommendations", "evidence_summary", "risk_assessment",
-    "contraindications", "monitoring_and_followup", "references",
-    "review_date", "authors", "specialty",
-]
+# ── Stage 3: Validation ────────────────────────────────────────
 
 
 @tool(
@@ -119,11 +111,14 @@ def validate_cpg_structure(
     return "Template validation issues:\n" + "\n".join(f"- {i}" for i in issues)
 
 
+# ── Stage 4: Persist / Retrieve ─────────────────────────────────
+
+
 @tool(
     name="store_cpg_document",
     description=(
         "Persist a CPG document in the session store. "
-        "Call this after generating or modifying a CPG. "
+        "Call this ONLY after the user has explicitly approved the final CPG. "
         "Returns the CPG ID and version."
     ),
 )
@@ -167,80 +162,3 @@ async def retrieve_cpg_document(
         return f"No CPG document found with ID: {cpg_id}"
 
     return json.dumps(cpg.model_dump(mode="json"), indent=2)
-
-
-# ── CPG Generation Pipeline (Workflow) ──────────────────────────
-
-
-def set_workflow_refs(workflow, session_store) -> None:
-    """Called by factory.py to inject the workflow and store references."""
-    global _cpg_workflow, _session_store_ref
-    _cpg_workflow = workflow
-    _session_store_ref = session_store
-
-
-@tool(
-    name="run_cpg_pipeline",
-    description=(
-        "Run the full deterministic CPG generation pipeline for a NEW clinical "
-        "topic. This executes a structured workflow: "
-        "1) Search clinical evidence → 2) Author the CPG → 3) Review the CPG. "
-        "Use this ONLY for creating a brand-new CPG. For modifying an existing "
-        "CPG, use retrieve_cpg_document + generate_or_modify_cpg instead."
-    ),
-)
-async def run_cpg_pipeline(
-    topic: Annotated[str, Field(description="The clinical topic for the new CPG, e.g. 'Management of Type 2 Diabetes in elderly patients'")],
-    specialty: Annotated[str | None, Field(description="Medical specialty, e.g. 'Endocrinology'")] = None,
-    requirements: Annotated[str, Field(description="Additional requirements or constraints for the CPG")] = "",
-    **kwargs: Any,
-) -> str:
-    """Execute the full CPG generation workflow and persist the result."""
-    from src.agents.executors import RetrievalRequest
-
-    if _cpg_workflow is None:
-        return "Error: CPG generation workflow not initialised."
-
-    logger.info("Running CPG pipeline for topic: %s", topic[:100])
-
-    request = RetrievalRequest(
-        topic=topic,
-        specialty=specialty,
-        requirements=requirements,
-    )
-
-    # Run the workflow — deterministic: Retrieval → Author → Reviewer
-    collected_outputs: list[str] = []
-    async for event in _cpg_workflow.run_stream(request):
-        if event.type == "output" and event.data:
-            collected_outputs.append(str(event.data))
-
-    if not collected_outputs:
-        return "Pipeline completed but produced no output."
-
-    # The last output is the reviewer's assessment; the second-to-last is the authored CPG
-    pipeline_result = "\n\n".join(collected_outputs)
-
-    # Try to extract and persist the CPG JSON from the pipeline output
-    session_store = kwargs.get("session_store") or _session_store_ref
-    if session_store:
-        for output in reversed(collected_outputs):
-            try:
-                # Find JSON in the output (the author agent outputs JSON)
-                start = output.index("{")
-                end = output.rindex("}") + 1
-                cpg_json = output[start:end]
-                cpg = CPGDocument(**json.loads(cpg_json))
-                await session_store.save_cpg(cpg)
-                logger.info("Pipeline CPG persisted: ID=%s, Version=%d", cpg.id, cpg.version)
-                return (
-                    f"CPG generated and stored successfully.\n"
-                    f"CPG ID: {cpg.id}\n"
-                    f"Version: {cpg.version}\n"
-                    f"Title: {cpg.title}\n\n"
-                    f"Full pipeline output:\n{pipeline_result}"
-                )
-            except (ValueError, json.JSONDecodeError):
-                continue
-
-    return f"Pipeline completed.\n\n{pipeline_result}"

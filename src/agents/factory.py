@@ -1,26 +1,18 @@
 """
-Agent and Workflow factory.
+Agent factory — creates the HITL orchestrator agent.
 
-Creates the Agent Framework agents, wires tools, and builds workflows.
 All agents use Azure OpenAI via Managed Identity.
-
-Architecture (hybrid):
-- New CPG creation  → deterministic Workflow pipeline (retrieve → author → review)
-- CPG modification  → conversational tool calls (orchestrator picks tools)
-- CPG review        → conversational tool call to reviewer sub-agent
-- General questions → orchestrator answers directly via AgentSession memory
+The orchestrator walks users through a 4-stage human-in-the-loop flow
+for CPG creation, pausing for consent at every stage boundary.
 """
 
-from agent_framework import InMemoryHistoryProvider, WorkflowBuilder
+from agent_framework import InMemoryHistoryProvider
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity.aio import DefaultAzureCredential
 
-from src.agents.executors import KnowledgeRetrievalExecutor
 from src.agents.tools import (
     retrieve_cpg_document,
-    run_cpg_pipeline,
     search_clinical_evidence,
-    set_workflow_refs,
     store_cpg_document,
     validate_cpg_structure,
 )
@@ -74,56 +66,96 @@ medical literature where possible. Maintain professional clinical tone.
 # ── Agent Instructions ──────────────────────────────────────────
 
 ORCHESTRATOR_INSTRUCTIONS = f"""\
-You are the CPG Multi-Agent Orchestrator — a clinical practice guideline expert
-system. You help users create, modify, and review Clinical Practice Guidelines.
+You are the CPG Orchestrator — a clinical practice guideline expert system
+that guides users through creating, modifying, and reviewing Clinical Practice
+Guidelines using a human-in-the-loop workflow.
 
-## Creating a NEW CPG
-Use the run_cpg_pipeline tool. It runs a deterministic pipeline:
-  1. Searches clinical evidence from the knowledge base
-  2. Generates the complete CPG via the specialist authoring agent
-  3. Reviews the CPG via the specialist reviewer agent
-  4. Persists the CPG and returns the ID
-Just call run_cpg_pipeline with the topic, specialty, and any requirements.
-After the pipeline completes, summarise the result and tell the user the CPG ID.
+## Creating a NEW CPG — 4-Stage Human-in-the-Loop Flow
+
+You MUST walk through these stages in order, pausing for user consent at
+each stage boundary. NEVER skip ahead without explicit user approval.
+
+### Stage 1: Evidence Retrieval
+1. Ask the user for the clinical topic, specialty, and any specific requirements.
+2. Use search_clinical_evidence to retrieve relevant evidence from the knowledge base.
+3. Present a summary of the evidence found (number of results, key sources, evidence levels).
+4. ASK the user: "I found X relevant sources. Shall I proceed to draft the CPG based on this evidence?"
+5. WAIT for the user to confirm before moving to Stage 2.
+
+### Stage 2: CPG Drafting
+1. Use generate_or_modify_cpg to create the full CPG document based on the retrieved evidence.
+2. Present a structured summary of the draft:
+   - Title and scope
+   - Number of recommendations
+   - Key clinical recommendations (brief)
+   - Target population
+3. ASK the user: "Here is the draft CPG summary. Would you like to review the full document, request changes, or proceed to validation?"
+4. WAIT for the user to confirm before moving to Stage 3. If the user requests changes, modify and re-present.
+
+### Stage 3: Review & Validation
+1. Use validate_cpg_structure to check template compliance.
+2. Use review_cpg_document to get a clinical review from the reviewer agent.
+3. Present BOTH the validation results and the review findings to the user.
+4. If there are critical issues, fix them and re-validate before asking to proceed.
+5. ASK the user: "The CPG has been validated and reviewed. Here are the findings. Shall I finalize and store the document?"
+6. WAIT for the user to confirm before moving to Stage 4.
+
+### Stage 4: Finalize & Store
+1. ONLY after the user has explicitly approved, use store_cpg_document to persist the CPG.
+2. Confirm the stored CPG ID and version to the user.
 
 ## Modifying an EXISTING CPG
-Use conversational tools step by step:
-  1. retrieve_cpg_document — load the current CPG by ID
-  2. generate_or_modify_cpg — pass the existing CPG JSON and the modification
-     instruction to the authoring sub-agent. Tell it to change ONLY the
-     requested sections and keep everything else unchanged. Increment version.
-  3. validate_cpg_structure — check the updated document
-  4. store_cpg_document — persist the new version
-  5. Tell the user what changed and the new version number
+1. Use retrieve_cpg_document to load the current CPG by ID.
+2. Use generate_or_modify_cpg to apply the requested changes. Tell it to change
+   ONLY the requested sections and keep everything else unchanged. Increment version.
+3. Present a summary of what changed.
+4. ASK the user to approve the changes before storing.
+5. Use validate_cpg_structure to check the updated document.
+6. Use store_cpg_document to persist (only after approval).
 
 ## Reviewing a CPG
-  1. retrieve_cpg_document — load the CPG
-  2. review_cpg_document — pass the CPG to the reviewer sub-agent
-  3. Present the review findings to the user
+1. Use retrieve_cpg_document to load the CPG.
+2. Use review_cpg_document to get the clinical review.
+3. Present the review findings to the user.
 
 ## Answering general questions
 Answer directly from your clinical knowledge. Use search_clinical_evidence
 if the user asks about specific evidence or literature.
 
-## Important rules
-- ALWAYS remember the current CPG ID from conversation context so the user
-  doesn't have to repeat it.
-- When modifying, NEVER regenerate the entire CPG — only change the requested
-  sections.
-- After any CPG change, validate and store the result.
+## Template Handling
+- If the user's message includes a "TEMPLATE CONTEXT" section, it means they
+  uploaded a CPG template file. You MUST generate the CPG following the EXACT
+  structure, section ordering, and format described in that template context.
+- When a template is provided, use the template's sections instead of the
+  default JSON template below. Pass the template context to the authoring
+  sub-agent so it produces output in the correct format.
+- If no template is uploaded, use the default JSON format below.
 
+## Important Rules
+- NEVER call store_cpg_document without explicit user approval.
+- NEVER skip stages or combine them without asking.
+- ALWAYS remember the current CPG ID from conversation context.
+- When modifying, NEVER regenerate the entire CPG — only change the requested sections.
+- Present clear summaries at each stage so the user can make informed decisions.
+- If the user says "go ahead" or "yes" at a stage boundary, proceed to the next stage.
+
+## Default CPG Template (used when no template file is uploaded)
 {CPG_TEMPLATE_INSTRUCTIONS}
 """
 
 CPG_AUTHOR_INSTRUCTIONS = f"""\
 You are a clinical practice guideline authoring specialist. Your sole job is to
-generate or modify CPG documents in strict JSON format.
+generate or modify CPG documents.
 
 When given a topic and evidence, produce a complete CPG document.
 When given an existing CPG and modification instructions, update only the
 specified sections and increment the version.
 
-Always output valid JSON and nothing else.
+If the request includes a TEMPLATE CONTEXT section, you MUST follow the exact
+structure, section ordering, and format described in that template. Reproduce
+the same headings, table layouts, and content organization.
+
+If no template context is provided, output valid JSON using this default format:
 
 {CPG_TEMPLATE_INSTRUCTIONS}
 """
@@ -166,55 +198,23 @@ def _create_chat_client() -> AzureOpenAIChatClient:
     )
 
 
-def _build_cpg_generation_workflow(client: AzureOpenAIChatClient):
-    """
-    Build the deterministic CPG generation pipeline:
-      KnowledgeRetrievalExecutor → CPG Author Agent → CPG Reviewer Agent
-
-    Returns the built Workflow object.
-    """
-    retrieval_executor = KnowledgeRetrievalExecutor()
-
-    author_agent = client.as_agent(
-        name="PipelineCPGAuthor",
-        instructions=CPG_AUTHOR_INSTRUCTIONS,
-    )
-
-    reviewer_agent = client.as_agent(
-        name="PipelineCPGReviewer",
-        instructions=CPG_REVIEWER_INSTRUCTIONS,
-    )
-
-    workflow = (
-        WorkflowBuilder(start_executor=retrieval_executor)
-        .add_edge(retrieval_executor, author_agent)
-        .add_edge(author_agent, reviewer_agent)
-        .build()
-    )
-
-    logger.info("CPG generation workflow built: Retrieval → Author → Reviewer.")
-    return workflow
-
-
 def create_orchestrator_agent(session_store=None):
     """
-    Create the main conversational CPG agent (hybrid architecture).
+    Create the main conversational CPG agent with human-in-the-loop flow.
 
-    - NEW CPG creation → delegates to run_cpg_pipeline (deterministic workflow)
-    - CPG modification → uses generate_or_modify_cpg sub-agent (conversational)
-    - CPG review       → uses review_cpg_document sub-agent (conversational)
-    - Evidence search  → uses search_clinical_evidence tool
-    - CPG persistence  → uses store/retrieve tools
+    Tools:
+    - search_clinical_evidence  (Stage 1 — Evidence Retrieval)
+    - generate_or_modify_cpg    (Stage 2 — CPG Drafting, sub-agent)
+    - validate_cpg_structure    (Stage 3 — Validation)
+    - review_cpg_document       (Stage 3 — Review, sub-agent)
+    - store_cpg_document        (Stage 4 — Finalize, only after user approval)
+    - retrieve_cpg_document     (CPG retrieval for modifications)
 
     Returns the orchestrator agent.
     """
     client = _create_chat_client()
 
-    # Build the deterministic workflow and inject it into the pipeline tool
-    workflow = _build_cpg_generation_workflow(client)
-    set_workflow_refs(workflow, session_store)
-
-    # Sub-agents for conversational modification and review
+    # Sub-agents for authoring and review
     author_agent = client.as_agent(
         name="CPGAuthor",
         instructions=CPG_AUTHOR_INSTRUCTIONS,
@@ -225,19 +225,15 @@ def create_orchestrator_agent(session_store=None):
         instructions=CPG_REVIEWER_INSTRUCTIONS,
     )
 
-    # Context provider: keeps the last 10 messages in the conversation window.
-    # Older messages are dropped to stay within the model's context budget.
+    # Context provider: keeps the last 10 messages in the conversation window
     history_provider = InMemoryHistoryProvider(max_messages=10)
 
-    # Main orchestrator with all tools
+    # Main orchestrator with HITL tools
     orchestrator = client.as_agent(
         name="CPGOrchestrator",
         instructions=ORCHESTRATOR_INSTRUCTIONS,
         context_providers=[history_provider],
         tools=[
-            # Deterministic pipeline for new CPG creation
-            run_cpg_pipeline,
-            # Conversational tools for modification / review
             search_clinical_evidence,
             validate_cpg_structure,
             store_cpg_document,
@@ -246,9 +242,10 @@ def create_orchestrator_agent(session_store=None):
                 name="generate_or_modify_cpg",
                 description=(
                     "Delegate CPG document generation or modification to the "
-                    "specialist authoring agent. For modifications, provide the "
+                    "specialist authoring agent. For new CPGs, provide the topic, "
+                    "evidence, and requirements. For modifications, provide the "
                     "FULL existing CPG JSON and clear instructions about which "
-                    "sections to change. The agent will return the updated CPG JSON."
+                    "sections to change. The agent will return the CPG JSON."
                 ),
             ),
             reviewer_agent.as_tool(
@@ -266,8 +263,8 @@ def create_orchestrator_agent(session_store=None):
     )
 
     logger.info(
-        "Orchestrator agent created with 7 tools: "
-        "run_cpg_pipeline, search, validate, store, retrieve, "
+        "Orchestrator agent created with 6 HITL tools: "
+        "search, validate, store, retrieve, "
         "author (sub-agent), reviewer (sub-agent)."
     )
     return orchestrator

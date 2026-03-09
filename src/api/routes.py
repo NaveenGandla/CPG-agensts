@@ -7,7 +7,7 @@ conversation state and tool-based orchestration.
 
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile
 
 from src.agents.factory import create_orchestrator_agent
 from src.api.schemas import (
@@ -15,15 +15,23 @@ from src.api.schemas import (
     ChatResponse,
     CPGResponse,
     CPGVersionListResponse,
+    DocumentListItem,
+    DocumentListResponse,
     HealthResponse,
     IndexDocumentRequest,
     IndexDocumentResponse,
+    SearchRequest,
+    SearchResponse,
+    SearchResultItem,
+    TemplateUploadResponse,
 )
 from src.core.logging import get_logger
 from src.core.settings import get_settings
 from src.models.search import SearchDocument
-from src.services.search_client import index_documents
+from src.models.search import SearchFilter, SearchQuery
+from src.services.search_client import hybrid_search, index_documents
 from src.services.session_store import create_session_store
+from src.services.template_parser import parse_template
 
 logger = get_logger("api")
 
@@ -34,14 +42,14 @@ router = APIRouter()
 _session_store = None
 _orchestrator = None
 _sessions: dict = {}  # session_id → AgentSession
+_session_templates: dict = {}  # session_id → template instructions string
 
 
 def _ensure_initialised():
-    """Lazily create the session store, then the orchestrator agent with workflow."""
+    """Lazily create the session store and the orchestrator agent."""
     global _session_store, _orchestrator
     if _orchestrator is None:
         _session_store = create_session_store()
-        # Pass session_store so the workflow pipeline tool can persist CPGs
         _orchestrator = create_orchestrator_agent(session_store=_session_store)
         logger.info("Orchestrator agent and session store initialised.")
 
@@ -58,6 +66,71 @@ async def health_check():
     )
 
 
+# ──────────────────────────── Template Upload ─────────────────
+
+
+@router.post(
+    "/template/upload",
+    response_model=TemplateUploadResponse,
+    tags=["template"],
+)
+async def upload_template(
+    file: UploadFile,
+    session_id: str | None = None,
+):
+    """
+    Upload a CPG template file (PDF, DOCX, PPTX, XLSX, TXT).
+
+    The file is parsed using Azure Document Intelligence to extract its
+    structure (sections, headings, tables). The extracted template is stored
+    for the session and automatically injected into all subsequent chat
+    messages so the agent generates CPGs in the same format.
+    """
+    _ensure_initialised()
+    session_id = session_id or str(uuid4())
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    file_bytes = await file.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(file_bytes) > 50 * 1024 * 1024:  # 50 MB limit
+        raise HTTPException(status_code=400, detail="File too large (max 50 MB)")
+
+    try:
+        parsed = await parse_template(file_bytes, file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Template parsing failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Template parsing failed: {exc}")
+
+    # Store the parsed template instructions for this session
+    _session_templates[session_id] = parsed["template_instructions"]
+    logger.info(
+        "Template uploaded for session %s: %s (%d sections)",
+        session_id, file.filename, len(parsed["sections"]),
+    )
+
+    # Ensure an AgentSession exists so the chat endpoint can use it
+    if session_id not in _sessions:
+        _sessions[session_id] = _orchestrator.create_session()
+
+    return TemplateUploadResponse(
+        session_id=session_id,
+        filename=file.filename,
+        sections=parsed["sections"],
+        tables=parsed["tables"],
+        message=(
+            f"Template '{file.filename}' parsed successfully. "
+            f"Found {len(parsed['sections'])} sections and "
+            f"{len(parsed['tables'])} tables. "
+            f"The CPG will be generated following this template's format."
+        ),
+    )
+
+
 # ──────────────────────────── Chat ──────────────────────────────
 
 
@@ -66,9 +139,8 @@ async def chat(request: ChatRequest):
     """
     Send a message to the CPG multi-agent system.
 
-    The orchestrator agent uses AgentSession for conversation continuity.
-    It has tools for evidence search, CPG generation (via sub-agent),
-    CPG review (via sub-agent), validation, and document storage.
+    If a template has been uploaded for this session, the template
+    instructions are automatically prepended to the first message.
     """
     _ensure_initialised()
     session_id = request.session_id or str(uuid4())
@@ -80,12 +152,22 @@ async def chat(request: ChatRequest):
         session = _orchestrator.create_session()
         _sessions[session_id] = session
 
+    # Inject template context if one was uploaded for this session
+    message = request.message
+    template_instructions = _session_templates.get(session_id)
+    if template_instructions:
+        message = (
+            f"{message}\n\n"
+            f"--- TEMPLATE CONTEXT ---\n"
+            f"{template_instructions}\n"
+            f"--- END TEMPLATE CONTEXT ---"
+        )
+        # Only inject on first use, then clear so it's not repeated
+        del _session_templates[session_id]
+
     try:
-        # Run the orchestrator agent with the user message.
-        # The agent decides which tools to call (search, generate, modify, etc.)
-        # The session_store kwarg is injected into tools that accept **kwargs.
         result = await _orchestrator.run(
-            request.message,
+            message,
             session=session,
             session_store=_session_store,
         )
@@ -135,6 +217,70 @@ async def get_cpg_versions(cpg_id: str):
         cpg_id=cpg_id,
         versions=[v.model_dump(mode="json") for v in versions],
     )
+
+
+# ──────────────────────────── Search ───────────────────────────
+
+
+@router.post("/search", response_model=SearchResponse, tags=["search"])
+async def search_evidence(request: SearchRequest):
+    """Search the clinical knowledge base with filters."""
+    search_filter = SearchFilter(
+        specialty=request.specialty,
+        min_publication_year=request.min_publication_year,
+        evidence_level=request.evidence_level,
+    )
+    query = SearchQuery(
+        query_text=request.query,
+        filter=search_filter if any([
+            request.specialty, request.min_publication_year, request.evidence_level,
+        ]) else None,
+        top_k=request.top_k,
+        use_semantic_ranking=True,
+        use_vector_search=True,
+    )
+
+    results = await hybrid_search(query)
+    items = [
+        SearchResultItem(
+            id=r.id, title=r.title, content=r.content, score=r.score,
+            specialty=r.specialty, publication_year=r.publication_year,
+            evidence_level=r.evidence_level, source=r.source,
+        )
+        for r in results
+    ]
+    return SearchResponse(results=items, total=len(items))
+
+
+@router.get("/documents", response_model=DocumentListResponse, tags=["documents"])
+async def list_documents(
+    specialty: str | None = None,
+    top: int = 50,
+):
+    """List indexed documents from the knowledge base."""
+    query = SearchQuery(
+        query_text="*",
+        filter=SearchFilter(specialty=specialty) if specialty else None,
+        top_k=top,
+        use_semantic_ranking=False,
+        use_vector_search=False,
+    )
+
+    results = await hybrid_search(query)
+
+    seen_titles: set[str] = set()
+    docs: list[DocumentListItem] = []
+    for r in results:
+        if r.title in seen_titles:
+            continue
+        seen_titles.add(r.title)
+        docs.append(DocumentListItem(
+            id=r.id, title=r.title, specialty=r.specialty,
+            publication_year=r.publication_year,
+            evidence_level=r.evidence_level, source=r.source,
+            content_preview=r.content[:200] if r.content else "",
+        ))
+    return DocumentListResponse(documents=docs, total=len(docs))
 
 
 # ──────────────────────────── Indexing ──────────────────────────

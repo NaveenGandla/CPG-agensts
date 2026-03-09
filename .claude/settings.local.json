@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/v-ngandla/OneDrive - Microsoft/Documents/Projects/M42/**)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\v-ngandla\\OneDrive - Microsoft\\Documents\\Projects\\M42"
+    ]
+  }
+}

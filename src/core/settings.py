@@ -36,6 +36,16 @@ class AzureSearchSettings(BaseSettings):
     model_config = {"env_prefix": "", "extra": "ignore"}
 
 
+class AzureDocIntelligenceSettings(BaseSettings):
+    """Azure Document Intelligence for template parsing."""
+
+    endpoint: Optional[str] = Field(None, alias="AZURE_DI_ENDPOINT")
+    api_key: Optional[str] = Field(None, alias="AZURE_DI_KEY")
+    model_id: str = Field("prebuilt-layout", alias="AZURE_DI_MODEL_ID")
+
+    model_config = {"env_prefix": "", "extra": "ignore"}
+
+
 class AzureMonitorSettings(BaseSettings):
     """Application Insights / Azure Monitor settings."""
 
@@ -69,6 +79,9 @@ class AppSettings(BaseSettings):
 
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     azure_search: AzureSearchSettings = Field(default_factory=AzureSearchSettings)
+    azure_doc_intelligence: AzureDocIntelligenceSettings = Field(
+        default_factory=AzureDocIntelligenceSettings
+    )
     azure_monitor: AzureMonitorSettings = Field(default_factory=AzureMonitorSettings)
     azure_redis: AzureRedisSettings = Field(default_factory=AzureRedisSettings)
 
