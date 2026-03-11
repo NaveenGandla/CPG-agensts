@@ -1,7 +1,7 @@
 """
 Agent factory — creates the HITL orchestrator agent.
 
-All agents use Azure OpenAI via Managed Identity.
+Supports both Managed Identity and API-key authentication (AUTH_MODE).
 The orchestrator walks users through a 4-stage human-in-the-loop flow
 for CPG creation, pausing for consent at every stage boundary.
 """
@@ -187,14 +187,28 @@ recommendation strength consistency, and clarity.
 
 
 def _create_chat_client() -> AzureOpenAIChatClient:
-    """Create an Azure OpenAI Chat Client using Managed Identity."""
-    settings = get_settings().azure_openai
+    """Create an Azure OpenAI Chat Client using Managed Identity or API key."""
+    settings = get_settings()
+    oai = settings.azure_openai
+
+    if settings.use_key_auth:
+        if not oai.api_key:
+            raise ValueError(
+                "AZURE_OPENAI_API_KEY is required when AUTH_MODE=key"
+            )
+        return AzureOpenAIChatClient(
+            endpoint=oai.endpoint,
+            deployment_name=oai.chat_deployment,
+            api_key=oai.api_key,
+            api_version=oai.api_version,
+        )
+
     credential = DefaultAzureCredential()
     return AzureOpenAIChatClient(
-        endpoint=settings.endpoint,
-        deployment_name=settings.chat_deployment,
+        endpoint=oai.endpoint,
+        deployment_name=oai.chat_deployment,
         credential=credential,
-        api_version=settings.api_version,
+        api_version=oai.api_version,
     )
 
 

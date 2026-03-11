@@ -4,6 +4,8 @@ Azure OpenAI embedding client.
 Chat completions are handled by the Microsoft Agent Framework agents.
 This module only provides the embedding endpoint for Azure AI Search
 vector generation.
+
+Supports both API-key and Managed Identity authentication via AUTH_MODE.
 """
 
 from openai import AsyncAzureOpenAI
@@ -22,16 +24,29 @@ _client: AsyncAzureOpenAI | None = None
 async def _get_client() -> AsyncAzureOpenAI:
     global _client
     if _client is None:
-        settings = get_settings().azure_openai
-        credential = get_credential()
-        token = await credential.get_token(
-            "https://cognitiveservices.azure.com/.default"
-        )
-        _client = AsyncAzureOpenAI(
-            azure_endpoint=settings.endpoint,
-            api_version=settings.api_version,
-            api_key=token.token,
-        )
+        settings = get_settings()
+        oai = settings.azure_openai
+
+        if settings.use_key_auth:
+            if not oai.api_key:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY is required when AUTH_MODE=key"
+                )
+            _client = AsyncAzureOpenAI(
+                azure_endpoint=oai.endpoint,
+                api_version=oai.api_version,
+                api_key=oai.api_key,
+            )
+        else:
+            credential = get_credential()
+            token = await credential.get_token(
+                "https://cognitiveservices.azure.com/.default"
+            )
+            _client = AsyncAzureOpenAI(
+                azure_endpoint=oai.endpoint,
+                api_version=oai.api_version,
+                api_key=token.token,
+            )
     return _client
 
 

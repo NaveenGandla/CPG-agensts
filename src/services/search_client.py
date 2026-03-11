@@ -21,7 +21,7 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents.models import VectorizedQuery
 
-from src.core.auth import get_credential
+from src.core.auth import get_search_credential
 from src.core.logging import get_logger, get_tracer
 from src.core.retry import async_retry
 from src.core.settings import get_settings
@@ -94,7 +94,7 @@ def _build_index_schema(index_name: str) -> SearchIndex:
 async def ensure_index_exists() -> None:
     """Create the search index if it does not already exist."""
     settings = get_settings().azure_search
-    credential = get_credential()
+    credential = get_search_credential()
     async with SearchIndexClient(
         endpoint=settings.endpoint, credential=credential
     ) as client:
@@ -109,7 +109,7 @@ async def ensure_index_exists() -> None:
 
 async def _get_search_client() -> SearchClient:
     settings = get_settings().azure_search
-    credential = get_credential()
+    credential = get_search_credential()
     return SearchClient(
         endpoint=settings.endpoint,
         index_name=settings.index_name,

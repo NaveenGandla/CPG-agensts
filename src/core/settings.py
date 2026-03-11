@@ -3,11 +3,19 @@ Application settings loaded from environment variables.
 Uses pydantic-settings for validation and type coercion.
 """
 
+from enum import Enum
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+
+class AuthMode(str, Enum):
+    """Authentication mode: API key or Managed Identity."""
+
+    KEY = "key"
+    IDENTITY = "identity"
 
 
 class AzureOpenAISettings(BaseSettings):
@@ -19,6 +27,7 @@ class AzureOpenAISettings(BaseSettings):
     embedding_deployment: str = Field(..., alias="AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
     max_tokens: int = Field(4096, alias="AZURE_OPENAI_MAX_TOKENS")
     temperature: float = Field(0.3, alias="AZURE_OPENAI_TEMPERATURE")
+    api_key: Optional[str] = Field(None, alias="AZURE_OPENAI_API_KEY")
 
     model_config = {"env_prefix": "", "extra": "ignore"}
 
@@ -32,6 +41,7 @@ class AzureSearchSettings(BaseSettings):
         "cpg-semantic-config", alias="AZURE_SEARCH_SEMANTIC_CONFIG"
     )
     top_k: int = Field(10, alias="AZURE_SEARCH_TOP_K")
+    api_key: Optional[str] = Field(None, alias="AZURE_SEARCH_API_KEY")
 
     model_config = {"env_prefix": "", "extra": "ignore"}
 
@@ -57,12 +67,13 @@ class AzureMonitorSettings(BaseSettings):
     model_config = {"env_prefix": "", "extra": "ignore"}
 
 
-class AzureRedisSettings(BaseSettings):
-    """Azure Redis Cache for session state."""
+class AzureCosmosSettings(BaseSettings):
+    """Azure Cosmos DB for session state and CPG document persistence."""
 
-    host: Optional[str] = Field(None, alias="AZURE_REDIS_HOST")
-    port: int = Field(6380, alias="AZURE_REDIS_PORT")
-    ssl: bool = Field(True, alias="AZURE_REDIS_SSL")
+    endpoint: Optional[str] = Field(None, alias="AZURE_COSMOS_ENDPOINT")
+    key: Optional[str] = Field(None, alias="AZURE_COSMOS_KEY")
+    database_name: str = Field("cpg-agent-db", alias="AZURE_COSMOS_DATABASE")
+    container_name: str = Field("sessions", alias="AZURE_COSMOS_CONTAINER")
     session_ttl_seconds: int = Field(3600, alias="SESSION_TTL_SECONDS")
 
     model_config = {"env_prefix": "", "extra": "ignore"}
@@ -76,6 +87,7 @@ class AppSettings(BaseSettings):
     debug: bool = Field(False, alias="DEBUG")
     host: str = Field("0.0.0.0", alias="APP_HOST")
     port: int = Field(8000, alias="APP_PORT")
+    auth_mode: AuthMode = Field(AuthMode.IDENTITY, alias="AUTH_MODE")
 
     azure_openai: AzureOpenAISettings = Field(default_factory=AzureOpenAISettings)
     azure_search: AzureSearchSettings = Field(default_factory=AzureSearchSettings)
@@ -83,9 +95,14 @@ class AppSettings(BaseSettings):
         default_factory=AzureDocIntelligenceSettings
     )
     azure_monitor: AzureMonitorSettings = Field(default_factory=AzureMonitorSettings)
-    azure_redis: AzureRedisSettings = Field(default_factory=AzureRedisSettings)
+    azure_cosmos: AzureCosmosSettings = Field(default_factory=AzureCosmosSettings)
 
     model_config = {"env_prefix": "", "extra": "ignore"}
+
+    @property
+    def use_key_auth(self) -> bool:
+        """Convenience property: True when key-based authentication is active."""
+        return self.auth_mode == AuthMode.KEY
 
 
 @lru_cache

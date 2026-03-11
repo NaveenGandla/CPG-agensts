@@ -1,6 +1,6 @@
 """
 Session state management.
-Uses Azure Redis Cache when available, falls back to in-memory store.
+Uses Azure Cosmos DB when available, falls back to in-memory store.
 """
 
 import json
@@ -50,72 +50,119 @@ class InMemorySessionStore:
         return self._cpg_versions.get(cpg_id, [])
 
 
-class RedisSessionStore:
-    """Azure Redis Cache session store for production multi-instance deployments."""
+class CosmosSessionStore:
+    """Azure Cosmos DB session store for production multi-instance deployments."""
 
     def __init__(self) -> None:
-        self._redis = None
+        self._container = None
 
-    async def _get_redis(self):
-        if self._redis is None:
-            import redis.asyncio as redis
+    async def _get_container(self):
+        if self._container is None:
+            from azure.cosmos.aio import CosmosClient
 
-            settings = get_settings().azure_redis
-            self._redis = redis.Redis(
-                host=settings.host,
-                port=settings.port,
-                ssl=settings.ssl,
-                decode_responses=True,
-            )
-        return self._redis
+            settings = get_settings()
+            cosmos = settings.azure_cosmos
+
+            if settings.use_key_auth:
+                if not cosmos.key:
+                    raise ValueError(
+                        "AZURE_COSMOS_KEY is required when AUTH_MODE=key"
+                    )
+                client = CosmosClient(cosmos.endpoint, credential=cosmos.key)
+            else:
+                from azure.identity.aio import DefaultAzureCredential
+
+                credential = DefaultAzureCredential()
+                client = CosmosClient(cosmos.endpoint, credential=credential)
+
+            database = client.get_database_client(cosmos.database_name)
+            self._container = database.get_container_client(cosmos.container_name)
+        return self._container
 
     async def get_session(self, session_id: str) -> Optional[Session]:
-        r = await self._get_redis()
-        data = await r.get(f"session:{session_id}")
-        if data:
-            return Session.model_validate_json(data)
-        return None
+        container = await self._get_container()
+        try:
+            item = await container.read_item(
+                item=f"session:{session_id}",
+                partition_key=f"session:{session_id}",
+            )
+            return Session.model_validate_json(item["data"])
+        except Exception:
+            return None
 
     async def save_session(self, session: Session) -> None:
-        r = await self._get_redis()
-        ttl = get_settings().azure_redis.session_ttl_seconds
-        await r.setex(
-            f"session:{session.id}", ttl, session.model_dump_json()
-        )
+        container = await self._get_container()
+        ttl = get_settings().azure_cosmos.session_ttl_seconds
+        await container.upsert_item({
+            "id": f"session:{session.id}",
+            "type": "session",
+            "data": session.model_dump_json(),
+            "ttl": ttl,
+        })
 
     async def delete_session(self, session_id: str) -> None:
-        r = await self._get_redis()
-        await r.delete(f"session:{session_id}")
+        container = await self._get_container()
+        try:
+            await container.delete_item(
+                item=f"session:{session_id}",
+                partition_key=f"session:{session_id}",
+            )
+        except Exception:
+            pass
 
     async def get_cpg(self, cpg_id: str) -> Optional[CPGDocument]:
-        r = await self._get_redis()
-        data = await r.get(f"cpg:{cpg_id}")
-        if data:
-            return CPGDocument.model_validate_json(data)
-        return None
+        container = await self._get_container()
+        try:
+            item = await container.read_item(
+                item=f"cpg:{cpg_id}",
+                partition_key=f"cpg:{cpg_id}",
+            )
+            return CPGDocument.model_validate_json(item["data"])
+        except Exception:
+            return None
 
     async def save_cpg(self, cpg: CPGDocument) -> None:
-        r = await self._get_redis()
-        await r.set(f"cpg:{cpg.id}", cpg.model_dump_json())
-        # Push version
+        container = await self._get_container()
+        # Save current CPG document
+        await container.upsert_item({
+            "id": f"cpg:{cpg.id}",
+            "type": "cpg",
+            "data": cpg.model_dump_json(),
+        })
+        # Save version snapshot
         version = CPGVersion(
             version=cpg.version,
             document=cpg.model_copy(deep=True),
             change_summary=f"Version {cpg.version}",
         )
-        await r.rpush(f"cpg_versions:{cpg.id}", version.model_dump_json())
+        await container.upsert_item({
+            "id": f"cpg_version:{cpg.id}:v{cpg.version}",
+            "type": "cpg_version",
+            "cpg_id": cpg.id,
+            "data": version.model_dump_json(),
+        })
 
     async def get_cpg_versions(self, cpg_id: str) -> list[CPGVersion]:
-        r = await self._get_redis()
-        raw = await r.lrange(f"cpg_versions:{cpg_id}", 0, -1)
-        return [CPGVersion.model_validate_json(v) for v in raw]
+        container = await self._get_container()
+        query = (
+            "SELECT * FROM c WHERE c.type = 'cpg_version' "
+            "AND c.cpg_id = @cpg_id ORDER BY c.id ASC"
+        )
+        items = container.query_items(
+            query=query,
+            parameters=[{"name": "@cpg_id", "value": cpg_id}],
+        )
+        versions = []
+        async for item in items:
+            versions.append(CPGVersion.model_validate_json(item["data"]))
+        return versions
 
 
-def create_session_store() -> InMemorySessionStore | RedisSessionStore:
-    """Factory: use Redis when configured, otherwise in-memory."""
-    settings = get_settings().azure_redis
-    if settings.host:
-        logger.info("Using Redis session store at %s", settings.host)
-        return RedisSessionStore()
-    logger.info("Using in-memory session store (no Redis configured).")
+def create_session_store() -> InMemorySessionStore | CosmosSessionStore:
+    """Factory: use Cosmos DB when configured, otherwise in-memory."""
+    settings = get_settings().azure_cosmos
+    if settings.endpoint:
+        logger.info("Using Cosmos DB session store at %s", settings.endpoint)
+        return CosmosSessionStore()
+    logger.info("Using in-memory session store (no Cosmos DB configured).")
     return InMemorySessionStore()

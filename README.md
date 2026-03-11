@@ -51,7 +51,7 @@ Built on **Microsoft Agent Framework** (the successor to Semantic Kernel + AutoG
 | **Agent-as-Tool** | Agent Framework | Orchestrator delegates to CPG Author / Reviewer sub-agents |
 | **@tool functions** | Agent Framework | Domain tools (search, validate, store) called by agents |
 | **Workflow edges** | Agent Framework | Type-safe message routing in the CPG generation pipeline |
-| **Session Store** | Custom (Redis/memory) | CPG document persistence and version tracking |
+| **Session Store** | Custom (Cosmos DB/memory) | CPG document persistence and version tracking |
 
 ### Agent Responsibilities
 
@@ -75,7 +75,7 @@ Built on **Microsoft Agent Framework** (the successor to Semantic Kernel + AutoG
 | **Azure Container Apps** | Serverless container hosting with auto-scaling |
 | **Azure Container Registry** | Docker image storage |
 | **Application Insights** | Structured logging, distributed tracing, metrics |
-| **Azure Redis Cache** | CPG document persistence for multi-instance deployments (optional) |
+| **Azure Cosmos DB** | CPG document persistence for multi-instance deployments (optional) |
 | **Managed Identity** | Passwordless authentication to all Azure services |
 
 ---
@@ -106,7 +106,7 @@ agents/
 │   └── services/
 │       ├── openai_client.py     # Embedding endpoint only (chat via Agent Framework)
 │       ├── search_client.py     # Azure AI Search (index schema + hybrid search)
-│       └── session_store.py     # Redis / in-memory CPG document store
+│       └── session_store.py     # Cosmos DB / in-memory CPG document store
 ├── scripts/
 │   ├── deploy.sh                # Azure CLI deployment
 │   └── setup_search_index.py    # Index creation + sample data
@@ -208,7 +208,7 @@ Assign these roles to the Container App's system-assigned managed identity:
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Yes | Embedding model deployment name |
 | `AZURE_SEARCH_ENDPOINT` | Yes | Azure AI Search endpoint URL |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | No | App Insights connection string |
-| `AZURE_REDIS_HOST` | No | Redis host for multi-instance sessions |
+| `AZURE_COSMOS_ENDPOINT` | No | Cosmos DB endpoint for multi-instance sessions |
 | `ENVIRONMENT` | No | `production` / `development` |
 | `DEBUG` | No | Enable OpenAPI docs (`true`/`false`) |
 

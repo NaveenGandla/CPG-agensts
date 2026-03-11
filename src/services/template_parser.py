@@ -62,13 +62,10 @@ async def _parse_with_document_intelligence(
     """Use Azure Document Intelligence to extract structure."""
     from azure.ai.documentintelligence.aio import DocumentIntelligenceClient
     from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
-    from azure.core.credentials import AzureKeyCredential
-    from azure.identity.aio import DefaultAzureCredential
 
-    if settings.api_key:
-        credential = AzureKeyCredential(settings.api_key)
-    else:
-        credential = DefaultAzureCredential()
+    from src.core.auth import get_doc_intelligence_credential
+
+    credential = get_doc_intelligence_credential()
 
     content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
