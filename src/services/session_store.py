@@ -9,7 +9,7 @@ from typing import Optional
 from src.core.logging import get_logger
 from src.core.settings import get_settings
 from src.models.cpg import CPGDocument, CPGVersion
-from src.models.session import Session
+from src.models.session import SessionMetadata as Session
 
 logger = get_logger("session_store")
 

@@ -5,36 +5,36 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 
 # Microsoft Agent Framework (public preview — successor to Semantic Kernel + AutoGen)
-agent-framework --pre
+agent-framework --pre 
 
 # Azure Identity
-azure-identity==1.19.0
+azure-identity
 
 # Azure OpenAI (retained for embedding endpoint used by AI Search)
-openai==1.58.1
+openai
 
 # Azure AI Search
-azure-search-documents==11.6.0b8
+azure-search-documents
 
 # Azure Document Intelligence (template parsing)
-azure-ai-documentintelligence==1.0.0
+azure-ai-documentintelligence
 
 # File handling
-python-multipart==0.0.20
+python-multipart
 
 # Azure Monitor / Application Insights
-azure-monitor-opentelemetry==1.6.4
-opentelemetry-api==1.29.0
-opentelemetry-sdk==1.29.0
+azure-monitor-opentelemetry
+opentelemetry-api
+opentelemetry-sdk
 
 # Azure Cosmos DB (optional — for multi-instance session store)
-azure-cosmos==4.9.0
+azure-cosmos
 
 # Utilities
-python-dotenv==1.0.1
+python-dotenv
 
 # Testing
-pytest==8.3.4
-pytest-asyncio==0.24.0
-httpx==0.28.1
-requests==2.32.3
+pytest
+pytest-asyncio
+httpx
+requests
